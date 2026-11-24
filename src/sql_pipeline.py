@@ -4,6 +4,7 @@ from pathlib import Path
 import logging
 
 # E-commerce ETL pipeline
+# Data quality validation and reporting
 
 # Add logging format
 logging.basicConfig(
