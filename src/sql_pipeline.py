@@ -3,6 +3,8 @@ import sqlite3
 from pathlib import Path
 import logging
 
+# E-commerce ETL pipeline
+
 # Add logging format
 logging.basicConfig(
     level=logging.INFO,
