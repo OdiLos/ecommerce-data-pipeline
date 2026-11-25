@@ -2,9 +2,13 @@ import pandas as pd
 import sqlite3
 from pathlib import Path
 import logging
+import time
 
 # E-commerce ETL pipeline
 # Data quality validation and reporting
+
+# Initiate pipeline timer
+pipeline_start = time.perf_counter()
 
 # Add logging format
 logging.basicConfig(
@@ -32,16 +36,14 @@ try:
     ]
 
     if missing_columns:
-        logging.error(
+        logging.debug(
             f"Missing required columns: {missing_columns}"
         )
         raise ValueError(
             f"Missing required columns: {missing_columns}"
         )
 
-    logging.info("Orders successfully extracted.")
-    logging.info("CSV structure successfully validated.") 
-
+    logging.info("Orders extracted and validated successfully.")
 except FileNotFoundError:
     logging.error("Orders CSV file could not be found!")
     raise
@@ -65,15 +67,14 @@ try:
     ]
 
     if missing_columns:
-        logging.error(
+        logging.debug(
             f"Missing required columns: {missing_columns}"
         )
         raise ValueError(
             f"Missing required columns: {missing_columns}"
         )
 
-    logging.info("Customers extraced successfully.")
-    logging.info("CSV structure successfully validated.")
+    logging.info("Customers extracted and validated successfully.")
 except FileNotFoundError:
     logging.error("Customers CSV file could not be found!")
     raise
@@ -97,15 +98,14 @@ try:
     ]
 
     if missing_columns:
-        logging.error(
+        logging.debug(
             f"Missing required columns: {missing_columns}"
         )
         raise ValueError(
             f"Missing required columns: {missing_columns}"
         )
 
-    logging.info("Products extraced successfully.")
-    logging.info("CSV structure successfully validated.")
+    logging.info("Products extracted and validated successfully.")
 except FileNotFoundError:
     logging.error("Products CSV file could not be found!")
     raise
@@ -114,9 +114,9 @@ except pd.errors.ParserError:
     raise
 
 # Inspect Orders data quality
-logging.warning(f"Missing values: {orders_df.isnull().sum()}")
-logging.warning(f"Duplicate records: {orders_df.duplicated().sum()}")
-logging.warning(f"Invalid quantities: {(orders_df["quantity"]<=0).sum()}")
+logging.debug(f"Missing values: {orders_df.isnull().sum()}")
+logging.debug(f"Duplicate records: {orders_df.duplicated().sum()}")
+logging.debug(f"Invalid quantities: {(orders_df["quantity"]<=0).sum()}")
 
 # Revome exact duplicate records from orders
 original_count = len(orders_df)
@@ -142,21 +142,24 @@ invalid_mask = missing_price | invalid_quantity
 invalid_orders = orders_df[invalid_mask].copy()
 valid_orders = orders_df[~invalid_mask].copy()
 
+valid_order_count = len(valid_orders)
+invalid_order_count = len(invalid_orders)
+
 logging.warning(
-    f"Invalid Orders: {len(invalid_orders)}"
+    f"Invalid Orders: {invalid_order_count}"
 )
 logging.info(
-    f"Valid Orders: {len(valid_orders)}"
+    f"Valid Orders: {valid_order_count}"
 )
 
-valid_percentage = (len(valid_orders) / total_orders) * 100
-invalid_percentage = (len(invalid_orders) / total_orders) * 100
+valid_percentage = (valid_order_count / total_orders) * 100
+invalid_percentage = (invalid_order_count / total_orders) * 100
 
 logging.info(f"Total orders processed: {total_orders}")
 logging.info(f"Valid data percentage: {valid_percentage:.2f}%")
 logging.info(f"Invalid data percentage: {invalid_percentage:.2f}%")
 
-MAX_INVALID_PERCENTAGE = 40
+MAX_INVALID_PERCENTAGE = 30
 
 if invalid_percentage > MAX_INVALID_PERCENTAGE:
     logging.error(
@@ -179,11 +182,11 @@ invalid_mask = missing_values | duplicate_id
 invalid_customers = customers_df[invalid_mask].copy()
 valid_customers = customers_df[~invalid_mask].copy()
 
-logging.warning(
-    f"Invalid Customers: {len(invalid_customers)}"
-)
+valid_customer_count = len(valid_customers)
+invalid_customer_count = len(invalid_customers)
+
 logging.info(
-    f"Valid Customers: {len(valid_customers)}"
+    f"Customers validated: {valid_customer_count} valid, {invalid_customer_count} rejected"
 )
 
 # Inspect product records
@@ -198,17 +201,18 @@ invalid_mask = missing_values | duplicate_id
 invalid_products = products_df[invalid_mask].copy()
 valid_products = products_df[~invalid_mask].copy()
 
-logging.warning(
-    f"Invalid Products: {len(invalid_products)}"
-)
+valid_product_count = len(valid_products)
+invalid_product_count = len(invalid_products)
+
 logging.info(
-    f"Valid Products: {len(valid_products)}"
+    f"Products validated: {valid_product_count} valid, {invalid_product_count} rejected"
 )
+
 
 # Function for Record validation
 def validate_record_count(table_name, expected_count, actual_count):
     if expected_count == actual_count:
-        logging.info(f"{table_name} count validation passed.")
+        logging.debug(f"{table_name} count validation passed.")
     else:
         logging.error(
             f"{table_name} count mismatch! "
@@ -372,12 +376,12 @@ rejected_products = connection.execute(
 ).fetchone()[0]
 
 # Validity check for data integrity
-validate_record_count("orders", len(valid_orders), clean_orders)
-validate_record_count("rejected_orders", len(invalid_orders), rejected_orders)
-validate_record_count("customers", len(valid_customers), clean_customers)
-validate_record_count("rejected_customers", len(invalid_customers), rejected_customers)
-validate_record_count("products", len(valid_products), clean_products)
-validate_record_count("rejected_products", len(invalid_products), rejected_products)
+validate_record_count("orders", valid_order_count, clean_orders)
+validate_record_count("rejected_orders", invalid_order_count, rejected_orders)
+validate_record_count("customers", valid_customer_count, clean_customers)
+validate_record_count("rejected_customers", invalid_customer_count, rejected_customers)
+validate_record_count("products", valid_product_count, clean_products)
+validate_record_count("rejected_products", invalid_product_count, rejected_products)
 
 # Referential integrity validation
 query = """SELECT
@@ -391,7 +395,16 @@ query = """SELECT
                 ON fo.product_id = dp.product_id
             WHERE dc.customer_id IS NULL
                 OR dp.product_id IS NULL;"""
-print(connection.execute(query).fetchall())
+#print(connection.execute(query).fetchall())
+integrity_issues = connection.execute(query).fetchall()
+
+if len(integrity_issues) != 0:
+    logging.error(f"Referential integrity validation: FAILED "
+                  f"{len(integrity_issues)} unmatched records found.")
+    raise ValueError("Referential integrity vailidation failed.")
+else:
+    logging.info("Referential integrity validation: PASSED")
+
 
 query = """SELECT dc.city, dp.category, SUM(revenue) AS total_revenue
             FROM fact_orders AS fo
@@ -402,6 +415,70 @@ query = """SELECT dc.city, dp.category, SUM(revenue) AS total_revenue
             GROUP BY dp.category, dc.city"""
 total_revenue = connection.execute(query).fetchall()
 
-print(total_revenue)
+# print(total_revenue)
 
 connection.close()
+
+
+# End pipeline timer
+pipeline_end = time.perf_counter()
+
+# Calculate pipeline duration
+execution_time = pipeline_end - pipeline_start
+
+logging.info(
+    f"Pipeline execution time: {execution_time:.2f} seconds"
+)
+logging.info("========== PIPELINE SUMMARY ==========")
+logging.info(f"Orders processed: {total_orders}")
+logging.info(f"Valid orders: {valid_order_count}")
+logging.info(f"Rejected orders: {invalid_order_count}")
+logging.info(f"Customers loaded: {valid_customer_count}")
+logging.info(f"Products loaded: {valid_product_count}")
+
+table_count = 6
+valid_loading_count = table_count
+
+if valid_order_count == clean_orders:
+    #logging.info("Order loading validation: PASSED")
+    valid_loading_count = valid_loading_count
+else:
+    logging.error("Order loading validation: FAILED")
+    valid_loading_count -= 1
+
+if invalid_order_count == rejected_orders:
+    #logging.info("Rejected Order loading validation: PASSED")
+    valid_loading_count = valid_loading_count
+else:
+    logging.error("Rejected Order loading validation: FAILED")
+    valid_loading_count -= 1
+
+if valid_customer_count == clean_customers:
+    #logging.info("Customer loading validation: PASSED")
+    valid_loading_count = valid_loading_count
+else:
+    logging.error("Customer loading validation: FAILED")
+    valid_loading_count -= 1
+
+if invalid_customer_count == rejected_customers:
+    #logging.info("Rejected Customer loading validation: PASSED")
+    valid_loading_count = valid_loading_count
+else:
+    logging.error("Rejected Customer loading validation: FAILED")
+    valid_loading_count -= 1
+
+if valid_product_count == clean_products:
+    #logging.info("Product loading validation: PASSED")
+    valid_loading_count = valid_loading_count
+else:
+    logging.error("Product loading validation: FAILED")
+    valid_loading_count -= 1
+
+if invalid_product_count == rejected_products:
+    #logging.info("Rejected Product loading validation: PASSED")
+    valid_loading_count = valid_loading_count
+else:
+    logging.error("Rejected Product loading validation: FAILED")
+    valid_loading_count -= 1
+
+logging.info(f"Database loading validation: {valid_loading_count}/{table_count} PASSED")
