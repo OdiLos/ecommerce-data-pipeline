@@ -3,6 +3,7 @@ import sqlite3
 from pathlib import Path
 import logging
 import time
+from sqlalchemy import create_engine, text, event
 
 # E-commerce ETL pipeline
 # Data quality validation and reporting
@@ -10,7 +11,7 @@ import time
 # Initiate pipeline timer
 pipeline_start = time.perf_counter()
 
-# Add logging format
+# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s"
@@ -19,10 +20,28 @@ logging.basicConfig(
 # Locate project directory
 project_root = Path(__file__).resolve().parent.parent
 
+# Define the path to the data warehouse database
+database_file = project_root / "database" / "warehouse.db"
+
+# Create a SQLAlchemy engine to manage database connections and transactions
+engine = create_engine(f"sqlite:///{database_file}")
+# Configure SQLite to use explicit transaction control
+@event.listens_for(engine, "connect")
+def configure_sqlite(dbapi_connection, connection_record):
+    dbapi_connection.isolation_level = None
+
+
+@event.listens_for(engine, "begin")
+def begin_transaction(connection):
+    connection.exec_driver_sql("BEGIN")
+
+# Define the path to raw CSV files
+orders_file = project_root / "data" / "raw" / "orders.csv"
+customers_file = project_root / "data" / "raw" / "customers.csv"
+products_file = project_root / "data" / "raw" / "products.csv"
+
 # Locate raw data files for orders
 try:
-    orders_file = project_root / "data" / "raw" / "orders.csv"
-
     # Extract orders data
     orders_df = pd.read_csv(orders_file)
     required_columns = [
@@ -36,7 +55,7 @@ try:
     ]
 
     if missing_columns:
-        logging.debug(
+        logging.error(
             f"Missing required columns: {missing_columns}"
         )
         raise ValueError(
@@ -48,13 +67,14 @@ except FileNotFoundError:
     logging.error("Orders CSV file could not be found!")
     raise
 except pd.errors.ParserError:
-    logging.error("CSV file could not be parsed.")
+    logging.error("Orders CSV file could not be parsed.")
+    raise
+except Exception:
+    logging.exception("Unexpected error while extracting orders data.")
     raise
 
 # Locate raw data files for customers
 try:
-    customers_file = project_root / "data" / "raw" / "customers.csv"
-    
     # Extract customers data
     customers_df = pd.read_csv(customers_file)
     required_columns = [
@@ -67,7 +87,7 @@ try:
     ]
 
     if missing_columns:
-        logging.debug(
+        logging.error(
             f"Missing required columns: {missing_columns}"
         )
         raise ValueError(
@@ -79,14 +99,15 @@ except FileNotFoundError:
     logging.error("Customers CSV file could not be found!")
     raise
 except pd.errors.ParserError:
-    logging.error("CSV file could not be parsed.")
+    logging.error("Customers CSV file could not be parsed.")
+    raise
+except Exception:
+    logging.exception("Unexpected error while extracting customers data.")
     raise
 
 # Locate raw data files for products
 try:
-    products_file = project_root / "data" / "raw" / "products.csv"
-    
-    # Extract customers data
+    # Extract products data
     products_df = pd.read_csv(products_file)
     required_columns = [
         'product_id', 'product', 'category'
@@ -98,7 +119,7 @@ try:
     ]
 
     if missing_columns:
-        logging.debug(
+        logging.error(
             f"Missing required columns: {missing_columns}"
         )
         raise ValueError(
@@ -110,13 +131,16 @@ except FileNotFoundError:
     logging.error("Products CSV file could not be found!")
     raise
 except pd.errors.ParserError:
-    logging.error("CSV file could not be parsed.")
+    logging.error("Products CSV file could not be parsed.")
+    raise
+except Exception:
+    logging.exception("Unexpected error while extracting products data.")
     raise
 
 # Inspect Orders data quality
 logging.debug(f"Missing values: {orders_df.isnull().sum()}")
-logging.debug(f"Duplicate records: {orders_df.duplicated().sum()}")
-logging.debug(f"Invalid quantities: {(orders_df["quantity"]<=0).sum()}")
+logging.debug(f"Duplicate order records: {orders_df.duplicated().sum()}")
+logging.debug(f"Invalid quantities: {(orders_df['quantity']<=0).sum()}")
 
 # Revome exact duplicate records from orders
 original_count = len(orders_df)
@@ -134,9 +158,10 @@ logging.info(f"Remaining records: {total_orders}")
 # Identify invalid records
 missing_price = orders_df["price"].isna()
 invalid_quantity = orders_df["quantity"] <= 0
+missing_quantity = orders_df["quantity"].isna()
 
 # Combine the conditions
-invalid_mask = missing_price | invalid_quantity
+invalid_mask = missing_price | invalid_quantity | missing_quantity
 
 # Seperate valid from invalid orders
 invalid_orders = orders_df[invalid_mask].copy()
@@ -163,22 +188,27 @@ MAX_INVALID_PERCENTAGE = 30
 
 if invalid_percentage > MAX_INVALID_PERCENTAGE:
     logging.error(
+        f"Invalid data percentage ({invalid_percentage:.2f}%)"
         f"exceeds threshold ({MAX_INVALID_PERCENTAGE}%)"
     )
     raise ValueError("Data quality threshold exceeded.")
 
-else:
-    logging.info("Data quality threshold passed.")
+logging.info(f"Data quality threshold passed: "
+             f"{invalid_percentage:.2f}% invalid "
+             f"(maximum allowed: {MAX_INVALID_PERCENTAGE:.2f}%)")
 
-# Inspect customer records
+# Inspect Customer data quality
 required_fields = ["customer_id", "name", "city"]
+
+logging.debug(f"Duplicate customer IDs: {customers_df['customer_id'].duplicated().sum()}")
+
 missing_values = customers_df[required_fields].isnull().any(axis=1)
 duplicate_id = customers_df["customer_id"].duplicated(keep=False)
 
 # Combine the conditions
 invalid_mask = missing_values | duplicate_id
 
-# Seperate valid from invalid orders
+# Seperate valid from invalid customers
 invalid_customers = customers_df[invalid_mask].copy()
 valid_customers = customers_df[~invalid_mask].copy()
 
@@ -189,15 +219,18 @@ logging.info(
     f"Customers validated: {valid_customer_count} valid, {invalid_customer_count} rejected"
 )
 
-# Inspect product records
+# Inspect Product data quality
 required_fields = ['product_id', 'product', 'category']
+
+logging.debug(f"Duplicate product IDs: {products_df['product_id'].duplicated().sum()}")
+
 missing_values = products_df[required_fields].isnull().any(axis=1)
 duplicate_id = products_df["product_id"].duplicated(keep=False)
 
 # Combine the conditions
 invalid_mask = missing_values | duplicate_id
 
-# Seperate valid from invalid orders
+# Seperate valid from invalid products
 invalid_products = products_df[invalid_mask].copy()
 valid_products = products_df[~invalid_mask].copy()
 
@@ -211,146 +244,163 @@ logging.info(
 
 # Function for Record validation
 def validate_record_count(table_name, expected_count, actual_count):
-    if expected_count == actual_count:
-        logging.debug(f"{table_name} count validation passed.")
-    else:
+    if expected_count != actual_count:
         logging.error(
-            f"{table_name} count mismatch! "
+            f"{table_name} count validation failed: "
             f"Expected: {expected_count}, Actual: {actual_count}"
         )
-        raise ValueError(f"{table_name} data integrity check faild.")
+        raise ValueError(f"{table_name} data integrity check failed.")
+
+    logging.info(f"{table_name} count validation passed: "
+                 f"Expected: {expected_count}, Actual: {actual_count}")
 
 # Load data and Build Star Schema
 try:
-
     # Load cleaned data into SQLite
-    database_file = project_root / "database" / "warehouse.db"
+    with engine.begin() as connection:
 
-    connection = sqlite3.connect(database_file)
+        valid_orders.to_sql(
+            "orders",
+            connection,
+            if_exists="replace",
+            index=False
+        )
 
-    valid_orders.to_sql(
-        "orders",
-        connection,
-        if_exists="replace",
-        index=False
-    )
+        invalid_orders.to_sql(
+            "rejected_orders",
+            connection,
+            if_exists="replace",
+            index=False
+        )
 
-    invalid_orders.to_sql(
-        "rejected_orders",
-        connection,
-        if_exists="replace",
-        index=False
-    )
+        valid_customers.to_sql(
+            "customers",
+            connection,
+            if_exists="replace",
+            index=False
+        )
 
-    valid_customers.to_sql(
-        "customers",
-        connection,
-        if_exists="replace",
-        index=False
-    )
+        invalid_customers.to_sql(
+            "rejected_customers",
+            connection,
+            if_exists="replace",
+            index=False
+        )
 
-    invalid_customers.to_sql(
-        "rejected_customers",
-        connection,
-        if_exists="replace",
-        index=False
-    )
+        valid_products.to_sql(
+            "products",
+            connection,
+            if_exists="replace",
+            index=False
+        )
 
-    valid_products.to_sql(
-        "products",
-        connection,
-        if_exists="replace",
-        index=False
-    )
-
-    invalid_products.to_sql(
-        "rejected_products",
-        connection,
-        if_exists="replace",
-        index=False
-    )
+        invalid_products.to_sql(
+            "rejected_products",
+            connection,
+            if_exists="replace",
+            index=False
+        )
 
 
 
-    # Building Star Schema
-    # Create dimensional tables
-    connection.execute("DROP TABLE IF EXISTS dim_customers")
-    connection.execute("DROP TABLE IF EXISTS dim_products")
+        # Building Star Schema
+        # Create dimensional tables
+        connection.execute(text("DROP TABLE IF EXISTS dim_customers"))
+        connection.execute(text("DROP TABLE IF EXISTS dim_products"))
 
-    connection.execute("""
-    CREATE TABLE dim_customers (
-        customer_id TEXT PRIMARY KEY,
-        name TEXT,
-        city TEXT,
-        email TEXT
-    );
-    """)
+        connection.execute(text("""
+        CREATE TABLE dim_customers (
+            customer_id TEXT PRIMARY KEY,
+            name TEXT,
+            city TEXT,
+            email TEXT
+        );
+        """))
 
-    connection.execute("""
-    INSERT INTO dim_customers
-    SELECT customer_id, name, city, email
-    FROM customers;
-    """)
+        connection.execute(text("""
+        INSERT INTO dim_customers
+        SELECT customer_id, name, city, email
+        FROM customers;
+        """))
 
-    connection.execute("""
-    CREATE TABLE dim_products (
-        product_id TEXT PRIMARY KEY,
-        product TEXT,
-        category TEXT);
-    """)
+        connection.execute(text("""
+        CREATE TABLE dim_products (
+            product_id TEXT PRIMARY KEY,
+            product TEXT,
+            category TEXT);
+        """))
 
-    connection.execute("""
-    INSERT INTO dim_products
-    SELECT product_id, product, category
-    FROM products;
-    """)
+        connection.execute(text("""
+        INSERT INTO dim_products
+        SELECT product_id, product, category
+        FROM products;
+        """))
 
-    # Create fact table
-    connection.execute("DROP TABLE IF EXISTS fact_orders")
+        # Create fact table
+        connection.execute(text("DROP TABLE IF EXISTS fact_orders"))
 
-    connection.execute("""
-    CREATE TABLE fact_orders (
-        order_id TEXT PRIMARY KEY,
-        customer_id TEXT,
-        product_id TEXT,
-        quantity INTEGER,
-        revenue REAL,
-        payment_status TEXT
-    );
-    """)
-
-    connection.execute("""
-    INSERT INTO fact_orders
-    SELECT 
+        connection.execute(text("""
+        CREATE TABLE fact_orders (
+            order_id TEXT PRIMARY KEY,
+            customer_id TEXT,
+            product_id TEXT,
+            quantity INTEGER,
+            revenue REAL,
+            payment_status TEXT
+        );
+        """))
+        
+        # Referential integrity validation for fact table
+        missing_records = pd.read_sql_query("""
+        SELECT 
             o.order_id, 
             c.customer_id, 
             p.product_id, 
             o.quantity, 
             o.price * o.quantity AS revenue, 
             o.payment_status
-    FROM orders AS o
-    JOIN customers AS c
-        ON o.customer_id = c.customer_id
-    JOIN products AS p
-        ON o.product = p.product;
-    """)
+        FROM orders AS o
+        LEFT JOIN customers AS c
+            ON o.customer_id = c.customer_id
+        LEFT JOIN products AS p
+            ON o.product = p.product
+        WHERE c.customer_id IS NULL
+            OR p.product_id IS NULL;
+        """, connection)
 
-    connection.commit()
+        if not missing_records.empty:
+            raise ValueError(
+                f"Fact table validation failed: "
+                f"{len(missing_records)} orders have missing references"
+            )
+
+        connection.execute(text("""
+        INSERT INTO fact_orders
+        SELECT 
+            o.order_id, 
+            c.customer_id, 
+            p.product_id, 
+            o.quantity, 
+            o.price * o.quantity AS revenue, 
+            o.payment_status
+        FROM orders AS o
+        JOIN customers AS c
+            ON o.customer_id = c.customer_id
+        JOIN products AS p
+            ON o.product = p.product
+        """))
+
 except Exception:
-    connection.rollback()
     logging.exception("Database loading failed")
     raise
 
-finally:
-    connection.close()
+logging.info("Data successfully loaded and star schema created in warehouse.db")
 
-logging.info("Data successfully loaded into warehouse.db")
-logging.info("Dimensional tables successfully created in warehouse.db")
-logging.info("Fact table successfully created in warehouse.db")
 
-#Verify database Loading
+# Open a SQLite connection to verify the loaded data
 connection = sqlite3.connect(database_file)
 
+#Verify database Loading
 clean_orders = connection.execute(
     "SELECT COUNT(*) FROM orders"
 ).fetchone()[0]
@@ -375,6 +425,18 @@ rejected_products = connection.execute(
     "SELECT COUNT(*) FROM rejected_products"
 ).fetchone()[0]
 
+dim_customers_count = connection.execute(
+    "SELECT COUNT(*) FROM dim_customers"
+).fetchone()[0]
+
+dim_products_count = connection.execute(
+    "SELECT COUNT(*) FROM dim_products"
+).fetchone()[0]
+
+fact_orders_count = connection.execute(
+    "SELECT COUNT(*) FROM fact_orders"
+).fetchone()[0]
+
 # Validity check for data integrity
 validate_record_count("orders", valid_order_count, clean_orders)
 validate_record_count("rejected_orders", invalid_order_count, rejected_orders)
@@ -382,8 +444,11 @@ validate_record_count("customers", valid_customer_count, clean_customers)
 validate_record_count("rejected_customers", invalid_customer_count, rejected_customers)
 validate_record_count("products", valid_product_count, clean_products)
 validate_record_count("rejected_products", invalid_product_count, rejected_products)
+validate_record_count("dim_customers", valid_customer_count, dim_customers_count)
+validate_record_count("dim_products", valid_product_count, dim_products_count)
+validate_record_count("fact_orders", valid_order_count, fact_orders_count)
 
-# Referential integrity validation
+# Referential integrity validation for loaded star schema
 query = """SELECT
                     fo.order_id,
                     fo.customer_id,
@@ -395,30 +460,25 @@ query = """SELECT
                 ON fo.product_id = dp.product_id
             WHERE dc.customer_id IS NULL
                 OR dp.product_id IS NULL;"""
-#print(connection.execute(query).fetchall())
+
 integrity_issues = connection.execute(query).fetchall()
 
-if len(integrity_issues) != 0:
+if integrity_issues:
     logging.error(f"Referential integrity validation: FAILED "
                   f"{len(integrity_issues)} unmatched records found.")
-    raise ValueError("Referential integrity vailidation failed.")
+    raise ValueError("Referential integrity validation failed.")
 else:
     logging.info("Referential integrity validation: PASSED")
 
-
-query = """SELECT dc.city, dp.category, SUM(revenue) AS total_revenue
-            FROM fact_orders AS fo
-            JOIN dim_customers As dc
-                ON fo.customer_id = dc.customer_id
-            JOIN dim_products AS dp
-                ON fo.product_id = dp.product_id
-            GROUP BY dp.category, dc.city"""
-total_revenue = connection.execute(query).fetchall()
-
-# print(total_revenue)
-
 connection.close()
 
+
+logging.info("========== PIPELINE SUMMARY ==========")
+logging.info(f"Orders processed: {total_orders}")
+logging.info(f"Valid orders: {valid_order_count}")
+logging.info(f"Rejected orders: {invalid_order_count}")
+logging.info(f"Customers loaded: {valid_customer_count}")
+logging.info(f"Products loaded: {valid_product_count}")
 
 # End pipeline timer
 pipeline_end = time.perf_counter()
@@ -429,56 +489,6 @@ execution_time = pipeline_end - pipeline_start
 logging.info(
     f"Pipeline execution time: {execution_time:.2f} seconds"
 )
-logging.info("========== PIPELINE SUMMARY ==========")
-logging.info(f"Orders processed: {total_orders}")
-logging.info(f"Valid orders: {valid_order_count}")
-logging.info(f"Rejected orders: {invalid_order_count}")
-logging.info(f"Customers loaded: {valid_customer_count}")
-logging.info(f"Products loaded: {valid_product_count}")
 
-table_count = 6
-valid_loading_count = table_count
-
-if valid_order_count == clean_orders:
-    #logging.info("Order loading validation: PASSED")
-    valid_loading_count = valid_loading_count
-else:
-    logging.error("Order loading validation: FAILED")
-    valid_loading_count -= 1
-
-if invalid_order_count == rejected_orders:
-    #logging.info("Rejected Order loading validation: PASSED")
-    valid_loading_count = valid_loading_count
-else:
-    logging.error("Rejected Order loading validation: FAILED")
-    valid_loading_count -= 1
-
-if valid_customer_count == clean_customers:
-    #logging.info("Customer loading validation: PASSED")
-    valid_loading_count = valid_loading_count
-else:
-    logging.error("Customer loading validation: FAILED")
-    valid_loading_count -= 1
-
-if invalid_customer_count == rejected_customers:
-    #logging.info("Rejected Customer loading validation: PASSED")
-    valid_loading_count = valid_loading_count
-else:
-    logging.error("Rejected Customer loading validation: FAILED")
-    valid_loading_count -= 1
-
-if valid_product_count == clean_products:
-    #logging.info("Product loading validation: PASSED")
-    valid_loading_count = valid_loading_count
-else:
-    logging.error("Product loading validation: FAILED")
-    valid_loading_count -= 1
-
-if invalid_product_count == rejected_products:
-    #logging.info("Rejected Product loading validation: PASSED")
-    valid_loading_count = valid_loading_count
-else:
-    logging.error("Rejected Product loading validation: FAILED")
-    valid_loading_count -= 1
-
-logging.info(f"Database loading validation: {valid_loading_count}/{table_count} PASSED")
+# Dispose of SQLAlchemy engine and release pooled connections
+engine.dispose()
