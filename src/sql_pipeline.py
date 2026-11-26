@@ -44,6 +44,8 @@ products_file = project_root / "data" / "raw" / "products.csv"
 try:
     # Extract orders data
     orders_df = pd.read_csv(orders_file)
+    
+    # Ordes schema validation
     required_columns = [
         "order_id", "customer_id", "product",
         "price", "quantity", "payment_status"
@@ -77,6 +79,8 @@ except Exception:
 try:
     # Extract customers data
     customers_df = pd.read_csv(customers_file)
+
+    # Customers schema validation
     required_columns = [
         'customer_id', 'name', 'city', 'email'
     ]
@@ -109,6 +113,8 @@ except Exception:
 try:
     # Extract products data
     products_df = pd.read_csv(products_file)
+
+    # Products schema validation
     required_columns = [
         'product_id', 'product', 'category'
     ]
