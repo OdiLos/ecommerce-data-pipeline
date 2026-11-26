@@ -90,3 +90,51 @@ for row in result:
     print(row)
 
 connection.close()
+
+# Revenue analysis using the data warehouse
+
+warehouse_database_file = project_root / "database" / "warehouse.db"
+
+wh_connection = sqlite3.connect(warehouse_database_file)
+
+# Calculate total order value
+query = """
+        SELECT SUM(revenue) AS total_order_value
+        FROM fact_orders;
+        """
+
+result = wh_connection.execute(query).fetchone()
+
+print(f"Total order value: €{result[0]:.2f}")
+
+
+# Calculate paid revenue
+query = """
+        SELECT SUM(revenue) AS paid_revenue
+        FROM fact_orders
+        WHERE payment_status = 'paid';
+        """
+
+result = wh_connection.execute(query).fetchone()
+
+print(f"Paid revenue: €{result[0]:.2f}")
+
+# Revenue analysis by city and category
+query = """ SELECT 
+                dc.city, 
+                dp.category, 
+                SUM(revenue) AS total_order_value
+            FROM fact_orders AS fo
+            JOIN dim_customers As dc
+                ON fo.customer_id = dc.customer_id
+            JOIN dim_products AS dp
+                ON fo.product_id = dp.product_id
+            GROUP BY dp.category, dc.city
+            ORDER BY dc.city, dp.category;"""
+
+city_category_revenue = wh_connection.execute(query).fetchall()
+
+for row in city_category_revenue:
+    print(row)
+
+wh_connection.close()
